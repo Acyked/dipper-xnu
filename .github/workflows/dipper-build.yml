@@ -1,0 +1,179 @@
+name: dipper-xnu-build
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DIPPER_PROJECT_ROOT: ${{ github.workspace }}
+      DIPPER_INPUTS: ${{ github.workspace }}/local/inputs
+      THEOS: ${{ github.workspace }}/local/theos
+      BUILD_TIMEZONE: Asia/Shanghai
+      BUILD_JOBS: "8"
+    steps:
+      - name: Free disk space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 51200
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+
+      - uses: actions/checkout@v4
+
+      - name: Install host deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang lld make python3 python3-venv \
+            perl xz-utils flex bison m4 iasl nasm gettext bc rsync device-tree-compiler \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu meson ninja-build \
+            autoconf automake uuid-dev zlib1g-dev libssl-dev curl ca-certificates git 7zip
+          sudo ln -sf "$(command -v 7zz)" /usr/local/bin/7z
+          7z || true
+          df -h /
+
+      - name: Download external inputs
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIPPER_INPUTS"
+          cd "$DIPPER_INPUTS"
+          curl -sSf --location --retry 3 'https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-x86_64.tar.xz' -o iOSToolchain-x86_64.tar.xz &
+          curl -sSf --location --retry 3 'https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz' -o iPhoneOS16.5.sdk.tar.xz &
+          curl -sSf --location --retry 3 'https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz' -o MacOSX13.3.sdk.tar.xz &
+          curl -sSf --location --retry 3 'https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.14.tar.xz' -o linux-7.0.14.tar.xz &
+          curl -sSf --location --retry 3 'https://download.freebsd.org/releases/amd64/15.1-RELEASE/src.txz' -o freebsd-15.1-src.txz &
+          curl -sSf --location --retry 3 'https://archive.mesa3d.org/mesa-25.0.7.tar.xz' -o mesa-25.0.7.tar.xz &
+          curl -sSf --location --retry 3 'https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/ath10k/WCN3990/hw1.0/firmware-5.bin' -o firmware-5.bin &
+          wait
+          curl -sSf --location --retry 5 'https://updates.cdn-apple.com/2023SpringFCS/fullrestores/032-85130/6AB0D10A-8AF9-4F6C-8CF5-A1B315CABE88/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw' -o 'iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw'
+
+      - name: Verify input hashes
+        run: |
+          set -euo pipefail
+          cd "$DIPPER_INPUTS"
+          sha256sum -c <<'SUMS'
+          a72a7a577e2fbe2838b6b5e9c72034fa7d114af96f0e1d4b016f18730ce4056e  iOSToolchain-x86_64.tar.xz
+          518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be  MacOSX13.3.sdk.tar.xz
+          de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98  linux-7.0.14.tar.xz
+          cf5762da53fd52e1eaf0f9ceee9bf58cbe314c821031d0d9ffa76823185a89e1  freebsd-15.1-src.txz
+          592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6  mesa-25.0.7.tar.xz
+          c1091c401f67e3aa7cdfeb2cc19e6c79be3c957aae4e097a019e9ccea07d52f2  iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw
+          fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127  firmware-5.bin
+          SUMS
+
+      - name: Prepare sources
+        run: python3 tools/prepare/prepare.py --prepare
+
+      - name: Inject device partition parameters
+        env:
+          DARWIN_UNIQ: ${{ secrets.DARWIN_UNIQ }}
+          DARWIN_LAST: ${{ secrets.DARWIN_LAST }}
+          UFS_DARWIN_BLOCKS: ${{ secrets.UFS_DARWIN_BLOCKS }}
+        run: |
+          set -euo pipefail
+          L=work/hackios/xnuloader/loader.c
+          K=work/hackios/xnu-src/xnu-8796.121.2/bsd/dev/redwood_ufs.c
+          sed -i "s|^#define BLOCK_DARWIN_UNIQ.*|#define BLOCK_DARWIN_UNIQ  ${DARWIN_UNIQ}|" "$L"
+          sed -i "s|^#define BLOCK_DARWIN_LAST.*|#define BLOCK_DARWIN_LAST  ${DARWIN_LAST}ULL|" "$L"
+          sed -i "s|^#define UFS_DARWIN_BLOCKS.*|#define UFS_DARWIN_BLOCKS  ${UFS_DARWIN_BLOCKS}ULL|" "$K"
+          grep -n 'BLOCK_DARWIN_LAST\|BLOCK_DARWIN_UNIQ' "$L"
+          grep -n 'UFS_DARWIN' "$K"
+
+      - name: Place toolchain, SDKs, firmware, cached tarballs
+        env:
+          FW_GMU_B64: ${{ secrets.FW_GMU_B64 }}
+          FW_SQE_B64: ${{ secrets.FW_SQE_B64 }}
+          FW_MDT_B64: ${{ secrets.FW_MDT_B64 }}
+          FW_B02_B64: ${{ secrets.FW_B02_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$THEOS/toolchain" "$THEOS/sdks"
+          tar -xJf "$DIPPER_INPUTS/iOSToolchain-x86_64.tar.xz" -C "$THEOS/toolchain"
+          tar -xJf "$DIPPER_INPUTS/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
+          python3 tools/prepare/check-sdk.py "$THEOS/sdks/iPhoneOS16.5.sdk"
+          "$THEOS/toolchain/linux/iphone/bin/clang" --version
+          K=work/hackios
+          mkdir -p "$K/fw-gpu" "$K/fw-wifi" "$K/xnu-deps/build/ath10k" "$K/xnu-deps/build/mesa"
+          echo "$FW_GMU_B64" | base64 -d > "$K/fw-gpu/a630_gmu.bin"
+          echo "$FW_SQE_B64" | base64 -d > "$K/fw-gpu/a630_sqe.fw"
+          echo "$FW_MDT_B64" | base64 -d > "$K/fw-gpu/a630_zap.mdt"
+          echo "$FW_B02_B64" | base64 -d > "$K/fw-gpu/a630_zap.b02"
+          cp "$DIPPER_INPUTS/firmware-5.bin" "$K/fw-wifi/firmware-5.bin"
+          cd "$K" && sha256sum -c <<'SUMS'
+          9ed861b8032cd84bde74a97da0fd9b10300c13323ceb4cc4a769217e8856ab39  fw-gpu/a630_gmu.bin
+          a432ff1365a5223381f95f1e722792ca4e3174842c9059c64ef0b231e3298aa6  fw-gpu/a630_sqe.fw
+          e9bf422014761eb24cc8d3ac3008903a602b8ef33d65f601588de20e561bbeea  fw-gpu/a630_zap.mdt
+          c9a0bb7e3c284f6b3ba489bbe4f5a5e7b00a32b967809bd690f532bb148fdf69  fw-gpu/a630_zap.b02
+          fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127  fw-wifi/firmware-5.bin
+          SUMS
+          cd "$DIPPER_PROJECT_ROOT"
+          cp "$DIPPER_INPUTS/linux-7.0.14.tar.xz" "$DIPPER_INPUTS/freebsd-15.1-src.txz" "$K/xnu-deps/build/ath10k/"
+          cp "$DIPPER_INPUTS/mesa-25.0.7.tar.xz" "$K/xnu-deps/build/mesa/"
+          tar -xJf "$DIPPER_INPUTS/MacOSX13.3.sdk.tar.xz" -C "$K/xnu-deps" --wildcards '*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*'
+          rm -f "$DIPPER_INPUTS/iOSToolchain-x86_64.tar.xz" "$DIPPER_INPUTS/iPhoneOS16.5.sdk.tar.xz" "$DIPPER_INPUTS/MacOSX13.3.sdk.tar.xz"
+
+      - name: Build kernel deps + ath10k + XNU
+        run: |
+          set -euo pipefail
+          cd work/hackios
+          bash xnu-deps/setup.sh
+          bash tools/mk-ath10k.sh
+          bash xnu-build.sh -j"$BUILD_JOBS" build
+          file xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          df -h /
+
+      - name: Build loader + UEFI
+        run: bash tools/build/build-loader-uefi.sh
+
+      - name: Extract iOS materials from IPSW
+        run: python3 tools/prepare/prepare-ios.py --ipsw "$DIPPER_INPUTS/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw"
+
+      - name: Build userland
+        run: bash tools/build/build-userland.sh
+
+      - name: Pack darwin image
+        run: |
+          set -euo pipefail
+          python3 tools/build/pack-darwin.py
+          sha256sum work/images/darwin.img
+
+      - name: Build boot payload
+        run: |
+          set -euo pipefail
+          python3 tools/build/build-payload.py --output work/runs/ci-desktop-01/candidate --seconds 300 --wifi --peripherals
+          (cd work/runs/ci-desktop-01/candidate && sha256sum -c SHA256SUMS)
+
+      - name: Collect outputs
+        run: |
+          set -euo pipefail
+          mkdir -p out/candidate
+          cp -a work/runs/ci-desktop-01/candidate/. out/candidate/
+          cp work/images/darwin.img out/darwin.img
+          cp work/hackios/xnuloader/loader.efi out/loader.efi
+          cp work/edk2/boot-dipper.img out/boot-dipper.img
+          cp work/hackios/xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 out/mach.development.bcm2837 || true
+          cp work/hackios/userland/root.apfs work/hackios/userland/flashboot.apfs out/ || true
+          (cd out && find . -type f | sort | xargs sha256sum > SHA256SUMS.all)
+          ls -la out out/candidate
+          df -h /
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dipper-ios-candidate
+          path: out/
+          retention-days: 30
+          compression-level: 1
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dipper-build-runs
+          path: work/runs/
+          retention-days: 30
