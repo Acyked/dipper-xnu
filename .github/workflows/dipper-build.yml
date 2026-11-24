@@ -22,8 +22,11 @@ jobs:
           sudo apt-get install -y -qq build-essential clang lld make python3 python3-venv \
             perl xz-utils flex bison m4 iasl nasm gettext bc rsync device-tree-compiler \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu meson ninja-build \
-            autoconf automake uuid-dev zlib1g-dev libssl-dev curl ca-certificates git 7zip
-          sudo ln -sf "$(command -v 7zz)" /usr/local/bin/7z
+            autoconf automake uuid-dev zlib1g-dev libssl-dev curl ca-certificates git
+          # 7-Zip >= 23 needed for APFS DMG; distro 7zip may be absent -> use official binary
+          curl -sSL 'https://www.7-zip.org/a/7z2409-linux-x64.tar.xz' -o /tmp/7z.tar.xz
+          mkdir -p /tmp/7zip && tar -xJf /tmp/7z.tar.xz -C /tmp/7zip
+          sudo ln -sf /tmp/7zip/7zz /usr/local/bin/7z
           7z || true
           df -h /
 
