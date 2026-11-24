@@ -23,11 +23,12 @@ jobs:
             perl xz-utils flex bison m4 iasl nasm gettext bc rsync device-tree-compiler \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu meson ninja-build \
             autoconf automake uuid-dev zlib1g-dev libssl-dev curl ca-certificates git
-          # 7-Zip >= 23 needed for APFS DMG; distro 7zip may be absent -> use official binary
-          curl -sSL 'https://www.7-zip.org/a/7z2409-linux-x64.tar.xz' -o /tmp/7z.tar.xz
+          # 7-Zip >= 23 needed for APFS DMG; distro 7zz absent -> official binary
+          curl -sfSL 'https://www.7-zip.org/a/7z2501-linux-x64.tar.xz' -o /tmp/7z.tar.xz
+          head -c6 /tmp/7z.tar.xz | od -An -tx1 | grep -q 'fd 37 7a 58 5a' || { echo '7z tarball not xz'; exit 1; }
           mkdir -p /tmp/7zip && tar -xJf /tmp/7z.tar.xz -C /tmp/7zip
           sudo ln -sf /tmp/7zip/7zz /usr/local/bin/7z
-          7z || true
+          7z | head -2
           df -h /
 
       - name: Download external inputs
