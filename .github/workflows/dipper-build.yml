@@ -114,6 +114,8 @@ jobs:
       - name: Build kernel deps + ath10k + XNU
         run: |
           set -euo pipefail
+          sudo apt-get install -y -qq llvm || true
+          export PATH="$THEOS/toolchain/linux/iphone/bin:$PATH"
           cd work/hackios
           bash xnu-deps/setup.sh
           bash tools/mk-ath10k.sh
